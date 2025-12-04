@@ -35,3 +35,17 @@ class PatchTSTConfig(BasicTSModelConfig):
     decomp: bool = field(default=False, metadata={"help": "Whether to use decomposition."})
     moving_avg: int = field(default=25, metadata={"help": "Moving average window size for decomposition."})
     output_attentions: bool = field(default=False, metadata={"help": "Whether to output attention weights."})
+    
+    # Autoencoder parameters for vector-based prediction
+    latent_size: int = field(default=128, metadata={"help": "Latent vector size for autoencoder."})
+    num_encoder_layers: int = field(default=2, metadata={"help": "Number of encoder layers in autoencoder."})
+    num_decoder_layers: int = field(default=2, metadata={"help": "Number of decoder layers in autoencoder."})
+    ae_dropout: float = field(default=0.15, metadata={"help": "Dropout rate for autoencoder."})
+    kl_clamp: float = field(default=0.5, metadata={"help": "KL divergence clamp value."})
+    kl_weight: float = field(default=1e-3, metadata={"help": "Weight for KL divergence loss."})
+    
+    # Vector prediction parameters
+    num_samples: int = field(default=8, metadata={"help": "Number of samples for energy-based training."})
+    beta: float = field(default=1.0, metadata={"help": "Beta parameter for distance function in energy score."})
+    noise_size: int = field(default=64, metadata={"help": "Noise size for MLP generator."})
+    num_mlp_layers: int = field(default=4, metadata={"help": "Number of MLP layers in generator."})
