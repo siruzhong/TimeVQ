@@ -1,99 +1,118 @@
-"""Train PatchTST Autoencoder (VAE) standalone."""
 import torch
-import torch.nn as nn
-from basicts.models.PatchTST import PatchTSTAutoencoder, PatchTSTConfig
-from basicts.modules.norm import RevIN
-from basicts.configs import BasicTSForecastingConfig
-from basicts.runners.callback import EarlyStopping, GradientClipping
-from basicts import BasicTSLauncher
+from src.basicts.models.PatchTST import PatchTSTAutoencoderForForecasting, PatchTSTConfig
+from src.basicts.configs import BasicTSForecastingConfig
+from src.basicts.runners.callback import EarlyStopping
+from src.basicts import BasicTSLauncher
 
 
-def patch_mse_metric(prediction=None, targets=None, patch_mse=None, **kwargs):
-    """Metric function for patch-level MSE (direct VAE reconstruction quality)."""
-    if patch_mse is not None:
-        return patch_mse
-    return torch.tensor(0.0)
+# Custom reconstruction metrics (compare inputs vs prediction, not targets vs prediction)
+def reconstruction_mae(prediction=None, inputs=None, **kwargs):
+    """Reconstruction MAE: compare prediction with inputs (not targets)."""
+    if inputs is None or prediction is None:
+        return torch.tensor(0.0)
+    return torch.mean(torch.abs(prediction - inputs))
 
 
-def patch_mae_metric(prediction=None, targets=None, patch_mae=None, **kwargs):
-    """Metric function for patch-level MAE (direct VAE reconstruction quality)."""
-    if patch_mae is not None:
-        return patch_mae
-    return torch.tensor(0.0)
+def reconstruction_mse(prediction=None, inputs=None, **kwargs):
+    """Reconstruction MSE: compare prediction with inputs (not targets)."""
+    if inputs is None or prediction is None:
+        return torch.tensor(0.0)
+    return torch.mean((prediction - inputs) ** 2)
 
 
-class AutoencoderWrapper(nn.Module):
-    """Wrapper to adapt autoencoder to BasicTS training pipeline."""
-    
-    def __init__(self, config: PatchTSTConfig):
-        super().__init__()
-        self.config = config
-        self.autoencoder = PatchTSTAutoencoder(config)
-        
-        self.use_revin = getattr(config, 'use_revin', False)
-        if self.use_revin:
-            self.revin = RevIN(config.num_features, affine=getattr(config, 'affine', False), subtract_last=getattr(config, 'subtract_last', False))
-        
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor = None):
-        if self.use_revin:
-            inputs = self.revin(inputs, "norm")
-            
-        batch_size, input_len, num_features = inputs.shape
-        patch_len, patch_stride = self.config.patch_len, self.config.patch_stride
-        
-        # Create patches
-        inputs_transposed = inputs.transpose(1, 2)
-        if self.config.padding:
-            inputs_transposed = nn.ReplicationPad1d((0, patch_stride))(inputs_transposed)
-        patches = inputs_transposed.unfold(dimension=-1, size=patch_len, step=patch_stride)
-        patches = patches.reshape(batch_size * num_features, -1, patch_len) # [batch_size * num_features, num_patches, patch_len]
-        
-        # Forward through autoencoder
-        latent_states, reconstruction, ae_loss = self.autoencoder(patches, targets=patches)
-        
-        # Calculate patch-level reconstruction error (more direct measure of VAE quality)
-        patch_mse = nn.MSELoss()(reconstruction, patches)
-        patch_mae = nn.L1Loss()(reconstruction, patches)
-        
-        # Reconstruct time series (for metrics only, loss is computed at patch level)
-        reconstruction_reshaped = reconstruction.reshape(batch_size, num_features, -1, patch_len)
-        output_list = []
-        for i in range(reconstruction.shape[1]):
-            output_list.append(reconstruction_reshaped[:, :, i, :].transpose(1, 2))
-        output = torch.cat(output_list, dim=1)[:, :self.config.output_len, :]
-        
-        result = {"prediction": output}
-        if self.training and ae_loss is not None:
-            result["loss"] = ae_loss  # BasicTS will use this directly
-        # Add patch-level metrics for VAE quality assessment
-        result["patch_mse"] = patch_mse
-        result["patch_mae"] = patch_mae
-        return result
+def reconstruction_rmse(prediction=None, inputs=None, **kwargs):
+    """Reconstruction RMSE: compare prediction with inputs (not targets)."""
+    if inputs is None or prediction is None:
+        return torch.tensor(0.0)
+    return torch.sqrt(torch.mean((prediction - inputs) ** 2))
 
 
-def main():
+def run_experiment(dataset_name: str, num_features: int, input_len: int, output_len: int, patch_len: int = 4, 
+        patch_stride: int = 4, latent_size: int = 16, num_encoder_layers: int = 2, num_decoder_layers: int = 2, 
+        ae_dropout: float = 0.1, kl_weight: float = 1e-3, kl_clamp: float = 0.5, gpus: str = "0"):
     model_config = PatchTSTConfig(
-        input_len=96, output_len=96, num_features=7,
-        patch_len=16, patch_stride=8,
-        hidden_size=256, latent_size=16,
-        num_encoder_layers=2, num_decoder_layers=2,
-        ae_dropout=0.1, kl_weight=1e-3, kl_clamp=0.5,
-        num_layers=2, n_heads=1, intermediate_size=256 * 4, fc_dropout=0.1,
-        use_revin=True, affine=True, subtract_last=False,
+        input_len=input_len,
+        output_len=output_len,
+        num_features=num_features,
+        patch_len=patch_len,
+        patch_stride=patch_stride,
+        latent_size=latent_size,
+        num_encoder_layers=num_encoder_layers,
+        num_decoder_layers=num_decoder_layers,
+        ae_dropout=ae_dropout,
+        kl_weight=kl_weight,
+        kl_clamp=kl_clamp,
     )
     
     cfg = BasicTSForecastingConfig(
-        model=AutoencoderWrapper, model_config=model_config,
-        dataset_name="ETTh1", input_len=96, output_len=96,
-        gpus="0", num_epochs=100, batch_size=64,
-        metrics=["MSE", "MAE", ("PatchMSE", patch_mse_metric), ("PatchMAE", patch_mae_metric)],
-        optimizer_params={"lr": 1e-3},
-        callbacks=[EarlyStopping(patience=10), GradientClipping(1.0)],
-        ckpt_save_dir="checkpoints/PatchTSTAutoencoder", seed=42,
+        model=PatchTSTAutoencoderForForecasting,
+        model_config=model_config,
+        dataset_name=dataset_name,
+        input_len=input_len,
+        output_len=output_len,
+        gpus=gpus,
+        batch_size=64,
+        metrics=[
+            ("ReconMAE", reconstruction_mae),
+            ("ReconMSE", reconstruction_mse),
+            ("ReconRMSE", reconstruction_rmse),
+        ],
+        target_metric="ReconMAE",  # Use reconstruction MAE for early stopping
+        callbacks=[EarlyStopping(patience=10)],
+        ckpt_save_dir=f"checkpoints/PatchTSTAutoencoder/{dataset_name}",
+        seed=42,
     )
     
     BasicTSLauncher.launch_training(cfg)
 
 
+datasets = [
+    ("ETTh1", 7),
+    ("ETTh2", 7),
+    ("ETTm1", 7),
+    ("ETTm2", 7),
+    ("Electricity", 321),
+    ("Weather", 21),
+    ("ExchangeRate", 8),
+]
+
+dataset_configs = {
+    "default": {
+        "input_lens": [96],
+        "output_lens": [96]
+    }
+}
+
+gpus = "0"
+patch_len = 4
+patch_stride = 4
+latent_size = 16
+num_encoder_layers = 2
+num_decoder_layers = 2
+ae_dropout = 0.1
+kl_weight = 1e-3
+kl_clamp = 0.5
+
 if __name__ == "__main__":
-    main()
+    for dataset_name, num_features in datasets:
+        config = dataset_configs.get(dataset_name, dataset_configs["default"])
+        input_lens = config["input_lens"]
+        output_lens = config["output_lens"]
+        
+        for input_len in input_lens:
+            for output_len in output_lens:
+                run_experiment(
+                    dataset_name=dataset_name,
+                    num_features=num_features,
+                    input_len=input_len,
+                    output_len=output_len,
+                    patch_len=patch_len,
+                    patch_stride=patch_stride,
+                    latent_size=latent_size,
+                    num_encoder_layers=num_encoder_layers,
+                    num_decoder_layers=num_decoder_layers,
+                    ae_dropout=ae_dropout,
+                    kl_weight=kl_weight,
+                    kl_clamp=kl_clamp,
+                    gpus=gpus,
+                )

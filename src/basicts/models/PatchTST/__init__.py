@@ -1,7 +1,7 @@
 from .arch import (PatchTSTBackbone, PatchTSTForClassification,
                    PatchTSTForForecasting, PatchTSTForReconstruction)
 from .arch.patchtst_autoencoder import (PatchTSTAutoencoder, PatchTSTDecoder,
-                                         PatchTSTEncoder)
+                                         PatchTSTEncoder, PatchTSTAutoencoderForForecasting)
 from .arch.patchtst_vector import PatchTSTVectorForForecasting
 from .config.patchtst_config import PatchTSTConfig
 
@@ -14,5 +14,6 @@ __all__ = [
     "PatchTSTAutoencoder",
     "PatchTSTEncoder",
     "PatchTSTDecoder",
+    "PatchTSTAutoencoderForForecasting",
     "PatchTSTVectorForForecasting",
     ]

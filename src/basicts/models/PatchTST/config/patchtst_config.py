@@ -48,4 +48,3 @@ class PatchTSTConfig(BasicTSModelConfig):
     num_samples: int = field(default=8, metadata={"help": "Number of samples for energy-based training."})
     beta: float = field(default=1.0, metadata={"help": "Beta parameter for distance function in energy score."})
     noise_size: int = field(default=64, metadata={"help": "Noise size for MLP generator."})
-    num_mlp_layers: int = field(default=4, metadata={"help": "Number of MLP layers in generator."})

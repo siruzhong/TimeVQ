@@ -1,26 +1,17 @@
-"""Train PatchTST_Vector model with pretrained autoencoder."""
 import os
 import glob
 import torch
-from typing import TYPE_CHECKING
-from basicts.models.PatchTST import PatchTSTVectorForForecasting, PatchTSTConfig
-from basicts.configs import BasicTSForecastingConfig
-from basicts.runners.callback import EarlyStopping, GradientClipping, BasicTSCallback
-from basicts import BasicTSLauncher
-from basicts.metrics import masked_mse
-
-if TYPE_CHECKING:
-    from basicts.runners.basicts_runner import BasicTSRunner
+from src.basicts.models.PatchTST import PatchTSTVectorForForecasting, PatchTSTConfig
+from src.basicts.configs import BasicTSForecastingConfig
+from src.basicts.runners.callback import EarlyStopping, GradientClipping, BasicTSCallback
+from src.basicts import BasicTSLauncher
 
 
-def energy_loss_fn(**kwargs) -> torch.Tensor:
+def loss(**kwargs):
+    """Loss function that uses model's loss directly."""
     if "loss" in kwargs:
         return kwargs["loss"]
-    prediction = kwargs.get("prediction") or kwargs.get("input")
-    targets = kwargs.get("targets") or kwargs.get("target")
-    if prediction is not None and targets is not None:
-        return masked_mse(prediction, targets)
-    raise ValueError("Loss function must receive either 'loss' from model or both 'prediction' and 'targets'")
+    raise ValueError("Model must return 'loss' in forward return")
 
 
 class LoadAutoencoderWeights(BasicTSCallback):
@@ -30,7 +21,7 @@ class LoadAutoencoderWeights(BasicTSCallback):
         super().__init__()
         self.ae_ckpt = ae_ckpt
     
-    def on_train_start(self, runner: "BasicTSRunner"):
+    def on_train_start(self, runner):
         if not (self.ae_ckpt and os.path.exists(self.ae_ckpt)):
             return
         
@@ -57,36 +48,101 @@ class LoadAutoencoderWeights(BasicTSCallback):
             runner.logger.warning(f"Failed to load autoencoder weights: {e}, continuing with random init")
 
 
-def main():
+def run_experiment(dataset_name: str, num_features: int, input_len: int, output_len: int,
+                   patch_len: int = 4, patch_stride: int = 4, latent_size: int = 16,
+                   num_encoder_layers: int = 2, num_decoder_layers: int = 2,
+                   ae_dropout: float = 0.1, kl_weight: float = 1e-3, kl_clamp: float = 0.5,
+                   freeze_ae: bool = True, ae_ckpt_dir: str = None, gpus: str = "0"):
     model_config = PatchTSTConfig(
-        input_len=96, output_len=96, num_features=7,
-        patch_len=16, patch_stride=8,
-        hidden_size=256, latent_size=16,
-        num_encoder_layers=2, num_decoder_layers=2,
-        num_mlp_layers=4, num_samples=8, beta=1.0, noise_size=16,
-        ae_dropout=0.1, kl_weight=1e-3, kl_clamp=0.5,
-        num_layers=3, n_heads=4, intermediate_size=256 * 4, fc_dropout=0.1,
-        use_revin=True, affine=True, subtract_last=False, decomp=False,
+        input_len=input_len,
+        output_len=output_len,
+        num_features=num_features,
+        patch_len=patch_len,
+        patch_stride=patch_stride,
+        latent_size=latent_size,
+        num_encoder_layers=num_encoder_layers,
+        num_decoder_layers=num_decoder_layers,
+        ae_dropout=ae_dropout,
+        kl_weight=kl_weight,
+        kl_clamp=kl_clamp,
     )
-    model_config.freeze_ae = True
+    model_config.freeze_ae = freeze_ae
     
     callbacks = [EarlyStopping(patience=10), GradientClipping(1.0)]
-    ae_ckpt_dir = "checkpoints/PatchTSTAutoencoder"
-    ckpt_files = glob.glob(os.path.join(ae_ckpt_dir, "**", "*_best_val_*.pt"), recursive=True)
-    if ckpt_files:
-        callbacks.append(LoadAutoencoderWeights(sorted(ckpt_files, key=os.path.getmtime)[-1]))
+    if ae_ckpt_dir:
+        ckpt_files = glob.glob(os.path.join(ae_ckpt_dir, "**", "*_best_val_*.pt"), recursive=True)
+        if ckpt_files:
+            callbacks.append(LoadAutoencoderWeights(sorted(ckpt_files, key=os.path.getmtime)[-1]))
     
     cfg = BasicTSForecastingConfig(
-        model=PatchTSTVectorForForecasting, model_config=model_config,
-        dataset_name="ETTh1", input_len=96, output_len=96,
-        gpus="0", num_epochs=100, batch_size=64,
-        metrics=["MSE", "MAE"], loss=energy_loss_fn,
-        optimizer_params={"lr": 1e-3}, callbacks=callbacks,
-        ckpt_save_dir="checkpoints/PatchTSTVector", seed=42,
+        model=PatchTSTVectorForForecasting,
+        model_config=model_config,
+        dataset_name=dataset_name,
+        input_len=input_len,
+        output_len=output_len,
+        gpus=gpus,
+        batch_size=64,
+        metrics=["MSE", "MAE"],
+        loss=loss,
+        callbacks=callbacks,
+        ckpt_save_dir=f"checkpoints/PatchTSTVector/{dataset_name}",
+        seed=42,
     )
     
     BasicTSLauncher.launch_training(cfg)
 
 
+datasets = [
+    ("ETTh1", 7),
+    ("ETTh2", 7),
+    ("ETTm1", 7),
+    ("ETTm2", 7),
+    ("Electricity", 321),
+    ("Weather", 21),
+    ("ExchangeRate", 8),
+]
+
+dataset_configs = {
+    "default": {
+        "input_lens": [96, 192, 336, 512],
+        "output_lens": [96, 192, 336, 720]
+    }
+}
+
+gpus = "0"
+patch_len = 4
+patch_stride = 4
+latent_size = 16
+num_encoder_layers = 2
+num_decoder_layers = 2
+ae_dropout = 0.1
+kl_weight = 1e-3
+kl_clamp = 0.5
+freeze_ae = True
+ae_ckpt_dir = "checkpoints/PatchTSTAutoencoder"
+
 if __name__ == "__main__":
-    main()
+    for dataset_name, num_features in datasets:
+        config = dataset_configs.get(dataset_name, dataset_configs["default"])
+        input_lens = config["input_lens"]
+        output_lens = config["output_lens"]
+        
+        for input_len in input_lens:
+            for output_len in output_lens:
+                run_experiment(
+                    dataset_name=dataset_name,
+                    num_features=num_features,
+                    input_len=input_len,
+                    output_len=output_len,
+                    patch_len=patch_len,
+                    patch_stride=patch_stride,
+                    latent_size=latent_size,
+                    num_encoder_layers=num_encoder_layers,
+                    num_decoder_layers=num_decoder_layers,
+                    ae_dropout=ae_dropout,
+                    kl_weight=kl_weight,
+                    kl_clamp=kl_clamp,
+                    freeze_ae=freeze_ae,
+                    ae_ckpt_dir=ae_ckpt_dir + f"/{dataset_name}",
+                    gpus=gpus,
+                )
